@@ -7,13 +7,15 @@ import mysql from "mysql2"; // ใช้สำหรับการฟอร์�
 export const router = express.Router();
 
 router.get("/", async (req, res) => {
-  const [rows] = await conn.query("SELECT * FROM `orders`");
+  const [rows] = await conn.query(
+    "SELECT * FROM `orders` ORDER BY `orders`.`order_id` ASC",
+  );
   res.json(rows);
 });
 
 router.get("/with-customers", async (req, res) => {
   const [rows] = await conn.query(
-    "SELECT * FROM `orders`, `customers` WHERE `orders`.`customer_id` = `customers`.`customer_id`",
+    "SELECT * FROM `orders`, `customers` WHERE `orders`.`customer_id` = `customers`.`customer_id` ORDER BY `orders`.`order_id` ASC",
   );
   res.json(rows);
 });
@@ -35,6 +37,7 @@ router.get("/with-customers/search", async (req, res) => {
       ON orders.customer_id = customers.customer_id
     WHERE customers.name LIKE ?
        OR CAST(customers.customer_id AS CHAR) LIKE ?
+    ORDER BY orders.order_id ASC
     `,
     [`%${keyword}%`, `%${keyword}%`],
   );
