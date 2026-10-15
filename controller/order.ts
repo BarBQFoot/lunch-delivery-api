@@ -18,6 +18,29 @@ router.get("/with-customers", async (req, res) => {
   res.json(rows);
 });
 
+router.get("/with-customers/search", async (req, res) => {
+  const { keyword } = req.query;
+
+  if (!keyword || typeof keyword !== "string") {
+    return res.status(400).json({
+      error: "keyword จำเป็นต้องระบุและต้องเป็น string",
+    });
+  }
+
+  const [rows] = await conn.query(
+    `
+    SELECT *
+    FROM orders
+    JOIN customers
+      ON orders.customer_id = customers.customer_id
+    WHERE customers.name LIKE ?
+       OR CAST(customers.customer_id AS CHAR) LIKE ?
+    `,
+    [`%${keyword}%`, `%${keyword}%`],
+  );
+  res.json(rows);
+});
+
 router.get("/nearby", async (req, res) => {
   const { lat, lng } = req.query;
 

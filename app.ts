@@ -1,8 +1,10 @@
 import express from "express";
+import cors from "cors";
 import { router as order } from "./controller/order";
 import { router as customer } from "./controller/customer";
 
 export const app = express();
+app.use(cors());
 // แปลงข้อมูลแบบข้อความทั่วไป (Text Body)
 app.use(express.text());
 // แปลงข้อมูลรูปแบบ JSON (JSON Body)
@@ -14,4 +16,3 @@ app.use("/customers", customer);
 app.use("/", (req, res) => {
   res.send("This is API server for practice project");
 });
-
