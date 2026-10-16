@@ -222,42 +222,25 @@ router.delete("/", async (req, res) => {
 
 router.put("/:id", async (req, res) => {
   try {
-    let id = req.params.id;
-
-    const [resultCheck] = await conn.query(
-      "SELECT * FROM orders WHERE order_id = ?",
-      [id],
-    );
-    const existingOrder = resultCheck as any;
-
-    if(existingOrder.length === 0) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    let order: Order = req.body;
+    const id = Number(req.params.id);
+    const quantity = Number(req.body.quantity);
 
     if (
-      !Number.isInteger(order.quantity) ||
-      order.quantity < 1 ||
-      order.quantity > 3
+      !Number.isInteger(id) ||
+      id < 1 ||
+      !Number.isInteger(quantity) ||
+      quantity < 1 ||
+      quantity > 3
     ) {
       return res.status(400).json({
-        message: "1 order ต้องมีอย่างน้อย 1 กล่อง และสามารถมีได้ไม่เกิน 3 กล่อง",
+        message: "order id ต้องถูกต้อง และจำนวนกล่องต้องเป็นจำนวนเต็มระหว่าง 1 ถึง 3",
       });
     }
 
-    let sql =
-      "UPDATE `orders` SET `customer_id`=?, `delivery_date`=?, `quantity`=?, `unit_price`=?, `unit_cost`=?, `is_simulated`=?, `status`=? WHERE `order_id`=?";
-    const [result] = await conn.query(sql, [
-      order.customer_id,
-      order.delivery_date,
-      order.quantity,
-      order.unit_price,
-      order.unit_cost,
-      order.is_simulated,
-      order.status,
-      id,
-    ]);
+    const [result] = await conn.query(
+      "UPDATE orders SET quantity = ? WHERE order_id = ?",
+      [quantity, id],
+    );
     const updateResult = result as any;
 
     if (updateResult.affectedRows === 0) {
