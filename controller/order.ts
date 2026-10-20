@@ -3,6 +3,7 @@ import { conn } from "../dbconnect";
 import { Order } from "../model/order";
 import { Customer } from "../model/customer";
 import mysql from "mysql2"; // ใช้สำหรับการฟอร์แมตคำสั่ง SQL แบบปลอดภัย
+import { getRoadDistances, OsrmError, parseCoordinate } from "../service/osrm";
 
 export const router = express.Router();
 
@@ -34,7 +35,7 @@ router.get("/with-customers/search", async (req, res) => {
     SELECT *
     FROM orders
     JOIN customers
-      ON orders.customer_id = customers.customer_id
+      ON orders.order_id = customers.order_id
     WHERE customers.name LIKE ?
        OR CAST(customers.customer_id AS CHAR) LIKE ?
     ORDER BY orders.order_id ASC
@@ -45,45 +46,57 @@ router.get("/with-customers/search", async (req, res) => {
 });
 
 router.get("/nearby", async (req, res) => {
-  const { lat, lng } = req.query;
+  const latitude = parseCoordinate(req.query.lat, 90);
+  const longitude = parseCoordinate(req.query.lng, 180);
 
-  if (!lat || !lng) {
+  if (latitude === null || longitude === null) {
     return res.status(400).json({
-      error: "lat และ lng จำเป็นต้องระบุ",
+      error: "lat และ lng ต้องเป็นพิกัดที่ถูกต้อง",
     });
   }
 
-  const [rows] = await conn.query(
-    `
-    SELECT
-      orders.*,
-      customers.name,
-      customers.phone,
-      customers.address,
-      customers.latitude,
-      customers.longitude,
+  try {
+    const [rows] = await conn.query(`
+      SELECT orders.*, customers.name, customers.phone, customers.address,
+             customers.latitude, customers.longitude
+      FROM orders
+      JOIN customers ON orders.customer_id = customers.customer_id
+      ORDER BY orders.order_id ASC
+    `);
+    type OrderWithLocation = Order & {
+      name: string;
+      phone: string;
+      address: string;
+      latitude: number | string | null;
+      longitude: number | string | null;
+    };
+    const candidates = (rows as OrderWithLocation[]).flatMap((order) => {
+      const lat = parseCoordinate(order.latitude, 90);
+      const lng = parseCoordinate(order.longitude, 180);
+      return lat === null || lng === null
+        ? []
+        : [{ order, coordinates: { latitude: lat, longitude: lng } }];
+    });
 
-      (
-        6371 * ACOS(
-          COS(RADIANS(?))
-          * COS(RADIANS(customers.latitude))
-          * COS(RADIANS(customers.longitude) - RADIANS(?))
-          + SIN(RADIANS(?))
-          * SIN(RADIANS(customers.latitude))
-        )
-      ) AS distance_km
-
-    FROM orders
-    JOIN customers
-      ON orders.customer_id = customers.customer_id
-
-    HAVING distance_km <= 2
-    ORDER BY distance_km ASC
-    `,
-    [lat, lng, lat],
-  );
-
-  res.json(rows);
+    const distances = await getRoadDistances(
+      { latitude, longitude },
+      candidates.map((candidate) => candidate.coordinates),
+    );
+    const nearby = candidates.flatMap(({ order }, index) => {
+      const distance = distances[index];
+      return distance != null && distance <= 3
+        ? [{ ...order, distance_km: distance }]
+        : [];
+    });
+    nearby.sort((first, second) => first.distance_km - second.distance_km);
+    return res.json(nearby);
+  } catch (error) {
+    console.error(error);
+    if (error instanceof OsrmError) {
+      return res.status(502).json({ error: "ไม่สามารถคำนวณระยะทางจาก OSRM ได้ กรุณาลองใหม่" });
+    }
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 router.post("/simulated", async (req, res) => {
