@@ -199,12 +199,14 @@ router.post("/", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     let id = req.params.id;
-    const [result] = await conn.query("DELETE FROM orders WHERE order_id = ?", [
+    const [result] = await conn.query("DELETE FROM orders WHERE order_id = ? AND NOT EXISTS (SELECT 1 FROM job_stops s WHERE s.order_id = orders.order_id)", [
       id,
     ]);
     const deleteResult = result as any;
 
     if (deleteResult.affectedRows === 0) {
+      const [assigned] = await conn.query("SELECT order_id FROM job_stops WHERE order_id = ?", [id]);
+      if ((assigned as unknown[]).length) return res.status(409).json({ error: "ออเดอร์นี้มีใบงานแล้ว ไม่สามารถลบได้" });
       return res.status(404).json({ error: "Order not found" });
     }
 
@@ -218,7 +220,7 @@ router.delete("/:id", async (req, res) => {
 router.delete("/", async (req, res) => {
   try {
     const [result] = await conn.query(
-      "DELETE FROM orders WHERE is_simulated = true",
+      "DELETE FROM orders WHERE is_simulated = true AND NOT EXISTS (SELECT 1 FROM job_stops s WHERE s.order_id = orders.order_id)",
     );
     const deleteResult = result as any;
 
@@ -251,12 +253,14 @@ router.put("/:id", async (req, res) => {
     }
 
     const [result] = await conn.query(
-      "UPDATE orders SET quantity = ? WHERE order_id = ?",
+      "UPDATE orders SET quantity = ? WHERE order_id = ? AND NOT EXISTS (SELECT 1 FROM job_stops s WHERE s.order_id = orders.order_id)",
       [quantity, id],
     );
     const updateResult = result as any;
 
     if (updateResult.affectedRows === 0) {
+      const [assigned] = await conn.query("SELECT order_id FROM job_stops WHERE order_id = ?", [id]);
+      if ((assigned as unknown[]).length) return res.status(409).json({ error: "ออเดอร์นี้มีใบงานแล้ว ไม่สามารถแก้จำนวนกล่องได้" });
       return res.status(404).json({ error: "Order not found" });
     }
     res.status(200).json({ affected_row: updateResult.affectedRows });

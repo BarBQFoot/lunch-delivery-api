@@ -87,3 +87,64 @@ export async function getRoadDistances(
     throw new OsrmError("Unable to request road distances from OSRM", { cause: error });
   }
 }
+
+export type RoadMatrix = (number | null)[][];
+export type RouteLine = { type: "LineString"; coordinates: [number, number][] };
+
+const matrixCache = new Map<string, { expires: number; matrix: RoadMatrix }>();
+
+/** All pairs in km; preserve input indexes even when customers share coordinates. */
+export async function getDistanceMatrix(points: Coordinates[]): Promise<RoadMatrix> {
+  if (!points.length || points.length > 100) throw new OsrmError("Expected 1–100 locations");
+  const baseUrl = (process.env.OSRM_BASE_URL || "https://router.project-osrm.org").replace(/\/+$/, "");
+  const keys = points.map(point => `${point.longitude},${point.latitude}`);
+  const unique = [...new Set(keys)];
+  const cacheKey = `${baseUrl}|${keys.join(";")}`;
+  const cached = matrixCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.matrix;
+  try {
+    const url = new URL(`${baseUrl}/table/v1/driving/${unique.join(";")}`);
+    url.searchParams.set("annotations", "distance");
+    const payload = await requestTable(url) as { code?: string; distances?: unknown };
+    if (payload?.code !== "Ok" || !Array.isArray(payload.distances) || payload.distances.length !== unique.length) {
+      throw new OsrmError("Invalid OSRM matrix");
+    }
+    const matrix: RoadMatrix = payload.distances.map((row: unknown) => {
+      if (!Array.isArray(row) || row.length !== unique.length ||
+          row.some(cell => cell !== null && (typeof cell !== "number" || !Number.isFinite(cell) || cell < 0))) {
+        throw new OsrmError("Invalid OSRM matrix row");
+      }
+      return row.map((cell: number | null) => cell === null ? null : cell / 1000);
+    });
+    const indexes = keys.map(key => unique.indexOf(key));
+    const expanded = indexes.map(from => indexes.map(to => matrix[from]![to]!));
+    if (matrixCache.size >= 30) matrixCache.delete(matrixCache.keys().next().value!);
+    matrixCache.set(cacheKey, { matrix: expanded, expires: Date.now() + 5 * 60_000 });
+    return expanded;
+  } catch (error) {
+    if (error instanceof OsrmError) throw error;
+    throw new OsrmError("Unable to get OSRM matrix", { cause: error });
+  }
+}
+
+export async function getRoute(points: Coordinates[]): Promise<RouteLine> {
+  if (points.length < 2 || points.length > 5) throw new OsrmError("Expected 2–5 route locations");
+  try {
+    const baseUrl = (process.env.OSRM_BASE_URL || "https://router.project-osrm.org").replace(/\/+$/, "");
+    const coordinates = points.map(point => `${point.longitude},${point.latitude}`).join(";");
+    const url = new URL(`${baseUrl}/route/v1/driving/${coordinates}`);
+    url.searchParams.set("geometries", "geojson");
+    url.searchParams.set("overview", "full");
+    url.searchParams.set("continue_straight", "false");
+    const data = await requestTable(url) as { code?: string; routes?: { geometry?: RouteLine }[] };
+    const geometry = data?.routes?.[0]?.geometry;
+    if (data?.code !== "Ok" || geometry?.type !== "LineString" || !Array.isArray(geometry.coordinates) ||
+        geometry.coordinates.length < 2 || geometry.coordinates.some(point =>
+          !Array.isArray(point) || point.length !== 2 || parseCoordinate(point[0], 180) === null ||
+          parseCoordinate(point[1], 90) === null)) throw new OsrmError("Invalid OSRM route geometry");
+    return geometry;
+  } catch (error) {
+    if (error instanceof OsrmError) throw error;
+    throw new OsrmError("Unable to get OSRM route", { cause: error });
+  }
+}

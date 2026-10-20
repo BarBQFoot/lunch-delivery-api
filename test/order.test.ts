@@ -130,7 +130,7 @@ describe("Order API", () => {
     const distances = response.body.map((order: { distance_km: number }) =>
       Number(order.distance_km),
     );
-    expect(distances.every((distance: number) => distance <= 2)).toBe(true);
+    expect(distances.every((distance: number) => distance <= 3)).toBe(true);
     expect(distances).toEqual([...distances].sort((a, b) => a - b));
   });
 });

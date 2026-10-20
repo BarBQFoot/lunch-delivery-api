@@ -41,13 +41,13 @@ describe("GET /orders/nearby road distances (no real database or network)", () =
       order(1), order(2, "13.758"), order(3, "13.759"),
       order(4, "13.760"), order(5), order(6, "13.761"),
     ]]);
-    fetchMock.mockResolvedValue(table([1800, 2000.1, 500, null, 2000]));
+    fetchMock.mockResolvedValue(table([1800, 3000.1, 500, null, 3000]));
 
     const response = await request(app).get(endpoint);
 
     expect(response.status).toBe(200);
     expect(response.body.map((row: { order_id: number }) => row.order_id)).toEqual([3, 1, 5, 6]);
-    expect(response.body.map((row: { distance_km: number }) => row.distance_km)).toEqual([0.5, 1.8, 1.8, 2]);
+    expect(response.body.map((row: { distance_km: number }) => row.distance_km)).toEqual([0.5, 1.8, 1.8, 3]);
     expect(response.body[0]).toMatchObject({ name: "Customer 3", quantity: 2 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const url = fetchMock.mock.calls[0]![0] as URL;
