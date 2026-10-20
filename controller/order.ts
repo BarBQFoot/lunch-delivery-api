@@ -35,7 +35,7 @@ router.get("/with-customers/search", async (req, res) => {
     SELECT *
     FROM orders
     JOIN customers
-      ON orders.order_id = customers.order_id
+      ON orders.customer_id = customers.customer_id
     WHERE customers.name LIKE ?
        OR CAST(customers.customer_id AS CHAR) LIKE ?
     ORDER BY orders.order_id ASC
