@@ -6,6 +6,7 @@ export class PlanningError extends Error {
   }
 }
 
+// เปลี่ยน: address และ Coordinates ในแผนมาจากสำเนาจุดส่งของ orders
 export interface PlanningOrder extends Coordinates {
   order_id: number;
   customer_id: number;

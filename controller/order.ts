@@ -7,16 +7,22 @@ import { getRoadDistances, OsrmError, parseCoordinate } from "../service/osrm";
 
 export const router = express.Router();
 
+// เปลี่ยน: อ่านจุดส่งจากสำเนาในออเดอร์ แต่คงชื่อฟิลด์เดิมให้ UI ใช้ต่อได้
+const ORDER_LOCATION_FIELDS = `orders.delivery_address AS address,
+  orders.delivery_latitude AS latitude, orders.delivery_longitude AS longitude`;
+const ORDER_CUSTOMER_FIELDS = `orders.*, customers.name, customers.phone, ${ORDER_LOCATION_FIELDS}`;
+
 router.get("/", async (req, res) => {
   const [rows] = await conn.query(
-    "SELECT * FROM `orders` ORDER BY `orders`.`order_id` ASC",
+    `SELECT orders.*, ${ORDER_LOCATION_FIELDS} FROM orders ORDER BY orders.order_id ASC`,
   );
   res.json(rows);
 });
 
 router.get("/with-customers", async (req, res) => {
   const [rows] = await conn.query(
-    "SELECT * FROM `orders`, `customers` WHERE `orders`.`customer_id` = `customers`.`customer_id` ORDER BY `orders`.`order_id` ASC",
+    `SELECT ${ORDER_CUSTOMER_FIELDS} FROM orders
+     JOIN customers ON orders.customer_id = customers.customer_id ORDER BY orders.order_id ASC`,
   );
   res.json(rows);
 });
@@ -32,7 +38,7 @@ router.get("/with-customers/search", async (req, res) => {
 
   const [rows] = await conn.query(
     `
-    SELECT *
+    SELECT ${ORDER_CUSTOMER_FIELDS}
     FROM orders
     JOIN customers
       ON orders.customer_id = customers.customer_id
@@ -57,8 +63,7 @@ router.get("/nearby", async (req, res) => {
 
   try {
     const [rows] = await conn.query(`
-      SELECT orders.*, customers.name, customers.phone, customers.address,
-             customers.latitude, customers.longitude
+      SELECT ${ORDER_CUSTOMER_FIELDS}
       FROM orders
       JOIN customers ON orders.customer_id = customers.customer_id
       ORDER BY orders.order_id ASC
@@ -127,6 +132,10 @@ router.post("/simulated", async (req, res) => {
         40,
         true,
         "ACTIVE",
+        // เปลี่ยน: ออเดอร์จำลองเก็บที่อยู่และพิกัดขณะสร้างชุดข้อมูลด้วย
+        randomCustomer.address,
+        randomCustomer.latitude,
+        randomCustomer.longitude,
       ]);
     }
 
@@ -140,7 +149,10 @@ router.post("/simulated", async (req, res) => {
         unit_price,
         unit_cost,
         is_simulated,
-        status
+        status,
+        delivery_address,
+        delivery_latitude,
+        delivery_longitude
       )
       VALUES ?
       `,
@@ -160,11 +172,10 @@ router.post("/simulated", async (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    let order: Order = req.body;
-    console.log(req.body);
+    const order: Order | undefined = req.body;
 
     if (
-      !Number.isInteger(order.quantity) ||
+      !order || !Number.isInteger(order.quantity) ||
       order.quantity < 1 ||
       order.quantity > 3
     ) {
@@ -173,19 +184,26 @@ router.post("/", async (req, res) => {
       });
     }
 
-    let sql =
-      "INSERT INTO `orders`(`customer_id`, `delivery_date`, `quantity`, `unit_price`, `unit_cost`, `is_simulated`, `status`) VALUES (?,?,?,?,?,?,?)";
+    // เปลี่ยน: คัดลอกจุดส่งจาก customers ภายใน INSERT เดียว ไม่รับค่าพิกัดจาก client
+    const sql = `INSERT INTO orders
+      (customer_id, delivery_date, quantity, unit_price, unit_cost, is_simulated, status,
+       delivery_address, delivery_latitude, delivery_longitude)
+      SELECT customer_id, ?, ?, ?, ?, ?, ?, address, latitude, longitude
+      FROM customers WHERE customer_id = ?`;
     const [result] = await conn.query(sql, [
-      order.customer_id,
       order.delivery_date,
       order.quantity,
       order.unit_price,
       order.unit_cost,
       order.is_simulated,
       order.status,
+      order.customer_id,
     ]);
 
     const insertResult = result as any;
+    if (insertResult.affectedRows === 0) {
+      return res.status(404).json({ error: "ไม่พบลูกค้าสำหรับสร้างออเดอร์" });
+    }
     res.status(201).json({
       affected_row: insertResult.affectedRows, // จำนวนแถวที่ได้รับผลกระทบ (สำเร็จ = 1)
       last_idx: insertResult.insertId, // รหัสไอดีล่าสุดที่ระบบสร้างขึ้นให้อัตโนมัติ (Auto increment id)

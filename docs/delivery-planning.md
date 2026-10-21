@@ -25,12 +25,32 @@ npm start
 
 Migration เพิ่มเฉพาะคอลัมน์ nullable ต่อไปนี้ โดยใช้ 4 ตารางเดิมและคงข้อจำกัดสถานะตาม CREATE.txt:
 
+- `orders.delivery_address`: ที่อยู่จัดส่งที่คัดลอกตอนสร้างออเดอร์
+- `orders.delivery_latitude` และ `orders.delivery_longitude`: พิกัดจัดส่งที่คัดลอกตอนสร้างออเดอร์
 - `job_sheets.planning_data`: JSON เก็บเงื่อนไข ราคา พิกัด และรายละเอียดแผนตอนยืนยัน เพื่อให้ใบงานย้อนหลังไม่เปลี่ยนตามข้อมูลลูกค้าปัจจุบัน
 - `job_sheets.started_at`: เวลาเริ่มงานจริง
 - `job_sheets.completed_at`: เวลาส่งครบจริง
 - `job_stops.delivered_at`: เวลาส่งจริงแต่ละออเดอร์
 
-คำสั่ง `npm run db:migrate` ตรวจว่ามีคอลัมน์แล้วหรือไม่ จึงรันซ้ำได้ ไฟล์ SQL สำหรับฐานข้อมูลเดิมอยู่ใน `migrations/001-delivery-planning.sql`
+คำสั่ง `npm run db:migrate` ตรวจว่ามีคอลัมน์แล้วหรือไม่ จึงรันซ้ำได้ ไฟล์ SQL สำหรับฐานข้อมูลเดิมอยู่ใน `migrations/001-delivery-planning.sql` และ `migrations/002-order-delivery-location.sql`
+
+## จุดส่งที่เก็บไว้ในออเดอร์
+
+เปลี่ยน: ออเดอร์ปกติและออเดอร์จำลองคัดลอกที่อยู่และพิกัดจาก `customers` ลง `orders.delivery_*` ตอนสร้าง
+การแก้ที่อยู่หรือพิกัดใน `customers` ภายหลังมีผลกับออเดอร์ที่สร้างใหม่ ส่วนออเดอร์เดิมยังใช้จุดส่งที่เก็บไว้
+ชื่อและเบอร์โทรยังอ่านจากลูกค้าปัจจุบัน จึงยังใช้ `customer_id` และ JOIN กับ `customers`
+
+- `POST /orders` คัดลอกจุดส่งด้วย `INSERT ... SELECT` ในคำสั่งเดียว และไม่ใช้พิกัดที่ส่งมาจาก client
+- `POST /orders/simulated` คัดลอกจุดส่งจากชุดข้อมูลลูกค้าที่อ่านตอนเริ่มสร้างออเดอร์จำลอง
+- API อ่านออเดอร์, ค้นหา, nearby, คำนวณแผน และเปิดใบงาน ใช้จุดส่งจากออเดอร์
+- Response ยังคงชื่อ `address`, `latitude`, `longitude` ผ่าน SQL alias จึงใช้กับ UI เดิมได้
+- แผนที่ยืนยันแล้วมีสำเนาใน `planning_data` อีกชั้น ใบงานเดิมที่มีสำเนานี้ยังใช้ข้อมูลเดิมได้
+
+ก่อนเริ่มใช้โค้ดใหม่ต้องรัน `npm run db:migrate` เพื่อเพิ่มคอลัมน์และเติมช่องที่ว่างจากข้อมูลลูกค้าปัจจุบัน
+การรันซ้ำจะไม่เขียนทับค่าที่เก็บแล้ว และไม่มีการย้อนใช้พิกัดลูกค้าปัจจุบันอัตโนมัติหากออเดอร์ขาดพิกัด
+หากลูกค้าเคยเปลี่ยนพิกัดมาก่อน การเติมข้อมูลออเดอร์เก่าจากลูกค้าปัจจุบันไม่สามารถกู้พิกัด ณ วันสั่งซื้อได้
+
+คอมเมนต์ `เปลี่ยน:` ในไฟล์ที่แก้ระบุจุดที่ปรับมาใช้สำเนาจุดส่ง
 
 ## Flow
 
@@ -71,6 +91,7 @@ Frontend ใน `src/app/frontend/test-api/test-api.ts` เรียก `GET /jo
 โดย [app.ts](../app.ts) ผูกเส้นทาง `/job-sheets` เข้ากับ [controller/job-sheet.ts](../controller/job-sheet.ts)
 
 Controller เรียก `eligibleOrders()` ใน [service/job-store.ts](../service/job-store.ts) เพื่ออ่าน `orders` คู่กับ `customers`
+โดยอ่านที่อยู่และพิกัดจาก `orders.delivery_*` ส่วนชื่อและเบอร์โทรจาก `customers`
 เลือกเฉพาะออเดอร์วันที่กำหนด สถานะ `ACTIVE` และยังไม่มีรายการใน `job_stops`
 
 ### 2. กดคำนวณแผนจัดส่ง
@@ -271,7 +292,7 @@ Interface และ type ใช้กำหนดโครงสร้างข�
 
 ```sh
 npm run typecheck
-npm test -- test/delivery-planning.test.ts test/job-sheet.test.ts test/order-nearby.test.ts
+npm test -- test/delivery-planning.test.ts test/job-sheet.test.ts test/order-nearby.test.ts test/order-location.test.ts
 ```
 
 ชุดข้างต้นจำลองฐานข้อมูลและบริการเส้นทาง ไม่แก้ข้อมูลจริง
@@ -279,6 +300,13 @@ npm test -- test/delivery-planning.test.ts test/job-sheet.test.ts test/order-nea
 
 ```sh
 node scripts/smoke-planning.cjs
+```
+
+ตรวจการเก็บพิกัดออเดอร์กับ MySQL จริง: สร้างลูกค้าและออเดอร์ทดสอบ เปลี่ยนพิกัดลูกค้า
+แล้วตรวจว่าออเดอร์เดิมไม่เปลี่ยน ออเดอร์ใหม่ใช้จุดใหม่ และยืนยันใบงานเดิมได้ โดย rollback ข้อมูลทดสอบทั้งหมด:
+
+```sh
+node scripts/smoke-order-location.cjs
 ```
 
 ชุดทดสอบ Angular:

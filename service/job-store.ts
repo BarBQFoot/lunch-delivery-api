@@ -4,8 +4,10 @@ import { conn } from "../dbconnect";
 import { DeliveryPlan, PlanningError, PlanningOrder, StoredPlanningData, bangkokTime, localDateTime, validDate } from "../model/delivery";
 import { normalizeOrders } from "./planning-input";
 
+// เปลี่ยน: ทั้งคำนวณแผน ยืนยัน และเปิดใบงาน ใช้จุดส่งของออเดอร์แทนพิกัดลูกค้าปัจจุบัน
 export const ORDER_FIELDS = `o.*, DATE_FORMAT(o.delivery_date, '%Y-%m-%d') AS delivery_date,
-  c.name, c.phone, c.address, c.latitude, c.longitude`;
+  c.name, c.phone, o.delivery_address AS address,
+  o.delivery_latitude AS latitude, o.delivery_longitude AS longitude`;
 const previews = new Map<string, { plan: DeliveryPlan; orders: PlanningOrder[]; expires: number }>();
 
 export function rememberPreview(plan: DeliveryPlan, orders: PlanningOrder[]) {

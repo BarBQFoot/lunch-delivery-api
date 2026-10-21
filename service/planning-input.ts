@@ -49,12 +49,13 @@ export function readOrderIds(value: unknown): number[] {
 export function normalizeOrders(rows: Record<string, unknown>[]): PlanningOrder[] {
   const issues: { order_id: unknown; reason: string }[] = [];
   const result = rows.map(row => {
+    // เปลี่ยน: SQL ตั้งชื่อฟิลด์จาก orders.delivery_* ไว้แล้ว ไม่ย้อนใช้พิกัดลูกค้าปัจจุบัน
     const latitude = parseCoordinate(row.latitude, 90);
     const longitude = parseCoordinate(row.longitude, 180);
     const quantity = Number(row.quantity);
     const unit_price = Number(row.unit_price);
     const unit_cost = Number(row.unit_cost);
-    if (latitude === null || longitude === null) issues.push({ order_id: row.order_id, reason: "พิกัดลูกค้าไม่ถูกต้อง" });
+    if (latitude === null || longitude === null) issues.push({ order_id: row.order_id, reason: "พิกัดจัดส่งของออเดอร์ไม่ถูกต้องหรือยังไม่ได้รัน migration" });
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 3 ||
         row.unit_price == null || row.unit_cost == null || !Number.isFinite(unit_price) ||
         !Number.isFinite(unit_cost) || unit_price < 0 || unit_cost < 0) {
