@@ -4,6 +4,8 @@ import { Order } from "../model/order";
 import { Customer } from "../model/customer";
 import mysql from "mysql2"; // ใช้สำหรับการฟอร์แมตคำสั่ง SQL แบบปลอดภัย
 import { getRoadDistances, OsrmError, parseCoordinate } from "../service/osrm";
+import { SHOP_ORIGIN } from "../service/shop";
+import { SERVICE_AREA_KM } from "../service/delivery-planning";
 
 export const router = express.Router();
 
@@ -107,7 +109,26 @@ router.get("/nearby", async (req, res) => {
 router.post("/simulated", async (req, res) => {
   try {
     const [customers] = await conn.query("SELECT * FROM customers");
-    let customersList = customers as Customer[];
+    // เปลี่ยน: ตรวจพิกัดและขอระยะตามถนนก่อนสุ่ม ไม่สุ่มลูกค้านอกพื้นที่บริการ
+    const candidates = (customers as Customer[]).flatMap((customer) => {
+      const latitude = parseCoordinate(customer.latitude, 90);
+      const longitude = parseCoordinate(customer.longitude, 180);
+      return latitude === null || longitude === null
+        ? []
+        : [{ customer, coordinates: { latitude, longitude } }];
+    });
+    const distances = await getRoadDistances(
+      SHOP_ORIGIN, candidates.map((candidate) => candidate.coordinates),
+    );
+    const customersList = candidates.flatMap(({ customer }, index) => {
+      const distance = distances[index];
+      return distance != null && distance <= SERVICE_AREA_KM ? [customer] : [];
+    });
+    if (!customersList.length) {
+      return res.status(422).json({
+        error: `ไม่มีลูกค้าที่มีพิกัดและเส้นทางตามถนนจากร้านไม่เกิน ${SERVICE_AREA_KM} กม. สำหรับจำลองออเดอร์`,
+      });
+    }
 
     const orders = [];
     const today = new Date().toLocaleDateString("en-CA", {
@@ -166,6 +187,9 @@ router.post("/simulated", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    if (error instanceof OsrmError) {
+      return res.status(502).json({ error: "ไม่สามารถคำนวณระยะทางจาก OSRM ได้ กรุณาลองใหม่" });
+    }
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -184,12 +208,44 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // เปลี่ยน: คัดลอกจุดส่งจาก customers ภายใน INSERT เดียว ไม่รับค่าพิกัดจาก client
+    if (!Number.isInteger(order.customer_id) || order.customer_id < 1) {
+      return res.status(400).json({ error: "customer_id ต้องเป็นจำนวนเต็มบวก" });
+    }
+
+    // เปลี่ยน: ใช้พิกัดลูกค้าในฐานข้อมูลตรวจระยะตามถนนก่อนสร้างออเดอร์
+    const [customers] = await conn.query(
+      "SELECT customer_id, address, latitude, longitude FROM customers WHERE customer_id = ?",
+      [order.customer_id],
+    );
+    const customer = (customers as Customer[])[0];
+    if (!customer) {
+      return res.status(404).json({ error: "ไม่พบลูกค้าสำหรับสร้างออเดอร์" });
+    }
+    const latitude = parseCoordinate(customer.latitude, 90);
+    const longitude = parseCoordinate(customer.longitude, 180);
+    if (latitude === null || longitude === null) {
+      return res.status(422).json({ error: "พิกัดลูกค้าไม่ถูกต้อง กรุณาแก้ไขก่อนสร้างออเดอร์" });
+    }
+
+    const [distance] = await getRoadDistances(SHOP_ORIGIN, [{ latitude, longitude }]);
+    if (distance == null) {
+      return res.status(422).json({ error: "ไม่พบเส้นทางตามถนนจากร้านถึงลูกค้า" });
+    }
+    if (distance > SERVICE_AREA_KM) {
+      return res.status(422).json({
+        error: `ลูกค้าอยู่นอกพื้นที่บริการ ${SERVICE_AREA_KM} กม. ตามถนนจากร้าน`,
+        distance_km: distance,
+      });
+    }
+
+    // เปลี่ยน: INSERT เฉพาะเมื่อจุดส่งยังตรงกับที่ผ่านการตรวจระยะทาง
+    // ถ้าลูกค้าถูกแก้พิกัดระหว่างรอ OSRM จะไม่บันทึกพิกัดใหม่ที่ยังไม่ได้ตรวจ
     const sql = `INSERT INTO orders
       (customer_id, delivery_date, quantity, unit_price, unit_cost, is_simulated, status,
        delivery_address, delivery_latitude, delivery_longitude)
       SELECT customer_id, ?, ?, ?, ?, ?, ?, address, latitude, longitude
-      FROM customers WHERE customer_id = ?`;
+      FROM customers WHERE customer_id = ?
+        AND latitude <=> ? AND longitude <=> ? AND address <=> ?`;
     const [result] = await conn.query(sql, [
       order.delivery_date,
       order.quantity,
@@ -198,11 +254,20 @@ router.post("/", async (req, res) => {
       order.is_simulated,
       order.status,
       order.customer_id,
+      customer.latitude,
+      customer.longitude,
+      customer.address,
     ]);
 
     const insertResult = result as any;
     if (insertResult.affectedRows === 0) {
-      return res.status(404).json({ error: "ไม่พบลูกค้าสำหรับสร้างออเดอร์" });
+      const [remaining] = await conn.query(
+        "SELECT customer_id FROM customers WHERE customer_id = ?", [order.customer_id],
+      );
+      if (!(remaining as Customer[]).length) {
+        return res.status(404).json({ error: "ไม่พบลูกค้าสำหรับสร้างออเดอร์" });
+      }
+      return res.status(409).json({ error: "ข้อมูลลูกค้าเปลี่ยนระหว่างตรวจระยะทาง กรุณาลองสร้างออเดอร์อีกครั้ง" });
     }
     res.status(201).json({
       affected_row: insertResult.affectedRows, // จำนวนแถวที่ได้รับผลกระทบ (สำเร็จ = 1)
@@ -210,6 +275,9 @@ router.post("/", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    if (error instanceof OsrmError) {
+      return res.status(502).json({ error: "ไม่สามารถคำนวณระยะทางจาก OSRM ได้ กรุณาลองใหม่" });
+    }
     res.status(500).json({ error: "Internal server error" });
   }
 });

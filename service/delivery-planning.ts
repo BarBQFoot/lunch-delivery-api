@@ -48,13 +48,13 @@ export function buildJob(sequence: number[], orders: PlanningOrder[], settings: 
       estimated_departure_at: bangkokTime(start + Math.ceil(minutes * 60) * 1000) });
     previous = index + 1;
   }
-  if (settings.return_to_shop) {
-    const back = matrix[previous]?.[0];
-    if (back == null || !Number.isFinite(back) || back < 0) return null;
-    distance += back;
-    minutes += back / settings.speed_kmh * 60;
-    // The deadline applies to deliveries; returning to the shop can be later.
-  }
+  // if (settings.return_to_shop) {
+  //   const back = matrix[previous]?.[0];
+  //   if (back == null || !Number.isFinite(back) || back < 0) return null;
+  //   distance += back;
+  //   minutes += back / settings.speed_kmh * 60;
+  //   // The deadline applies to deliveries; returning to the shop can be later.
+  // }
   const boxes = stops.reduce((sum, stop) => sum + stop.order.quantity, 0);
   const revenue = round(stops.reduce((sum, stop) => sum + stop.order.quantity * stop.order.unit_price, 0));
   const foodCost = round(stops.reduce((sum, stop) => sum + stop.order.quantity * stop.order.unit_cost, 0));

@@ -18,6 +18,8 @@ export interface PlanningOrder extends Coordinates {
   name: string;
   phone: string;
   address: string;
+  latitude: number;
+  longitude: number;
 }
 
 export interface PlanningSettings {
