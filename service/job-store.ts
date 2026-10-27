@@ -25,13 +25,25 @@ const previews = new Map<
   { plan: DeliveryPlan; orders: PlanningOrder[]; expires: number }
 >();
 
-export function rememberPreview(plan: DeliveryPlan, orders: PlanningOrder[]) {
+// ใช้แผนเดียวกันทั้งตอนขอแผนอื่นและ confirm ไม่มีประวัติแผนหรือ hash
+export function getPreview(id: string) {
+  const preview = previews.get(id);
+  if (!preview || preview.expires < Date.now())
+    throw new PlanningError("แผนหมดอายุ ถูกแทนที่ หรือยืนยันแล้ว กรุณาคำนวณแผนใหม่", 409);
+  return preview;
+}
+
+export function rememberPreview(plan: DeliveryPlan, orders: PlanningOrder[], previousId?: string) {
+  // ตรวจอีกครั้งหลังรอ OSRM ป้องกันคำขอเก่ามาแทนแผนที่เปลี่ยน/ยืนยันไปแล้ว
+  if (previousId) getPreview(previousId);
   for (const [key, preview] of previews)
     if (preview.expires < Date.now()) previews.delete(key);
-  if (previews.size >= 50) previews.delete(previews.keys().next().value!);
+  if (!previousId && previews.size >= 50) previews.delete(previews.keys().next().value!);
   const id = randomUUID();
   const expires = Date.now() + 30 * 60_000;
   previews.set(id, { plan, orders, expires });
+  // สร้างใหม่สำเร็จแล้วเท่านั้นจึงลบตัวที่ถูกแทนที่ ไม่ล้างแผนของคนอื่น
+  if (previousId) previews.delete(previousId);
   return {
     preview_id: id,
     expires_at: new Date(expires).toISOString(),
@@ -84,9 +96,7 @@ async function transaction<T>(
 }
 
 export async function confirmPreview(id: string) {
-  const preview = previews.get(id);
-  if (!preview || preview.expires < Date.now())
-    throw new PlanningError("แผนหมดอายุหรือยืนยันแล้ว กรุณาคำนวณแผนใหม่", 409);
+  const preview = getPreview(id);
   const issued = await transaction(async (db) => {
     const ids = preview.orders
       .map((order) => order.order_id)

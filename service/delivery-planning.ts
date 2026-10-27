@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { DeliveryPlan, PlannedJob, PlannedStop, PlanningError, PlanningOrder, PlanningSettings,
   bangkokTime, localDateTime, round, timestamp } from "../model/delivery";
 import type { RoadMatrix } from "./osrm";
@@ -20,11 +19,6 @@ export function validateServiceArea(orders: PlanningOrder[], matrix: RoadMatrix)
     return [];
   });
   if (issues.length) throw new PlanningError("บางออเดอร์อยู่นอกพื้นที่บริการ 3 กม. หรือไม่มีเส้นทางจากร้าน", 422, issues);
-}
-
-export function planSignature(jobs: PlannedJob[]): string {
-  const routes = jobs.map(job => job.stops.map(stop => stop.order.order_id).join(",")).sort();
-  return createHash("sha256").update(routes.join("|")).digest("hex");
 }
 
 export function buildJob(sequence: number[], orders: PlanningOrder[], settings: PlanningSettings, matrix: RoadMatrix): PlannedJob | null {
@@ -69,78 +63,108 @@ function permutations(values: number[]): number[][] {
   return values.flatMap((value, index) => permutations(values.filter((_, i) => i !== index)).map(rest => [value, ...rest]));
 }
 
-/** Enumerate groups of at most 3, then search disjoint groups under a bounded budget. */
-export function createDeliveryPlan(orders: PlanningOrder[], settings: PlanningSettings, matrix: RoadMatrix, excluded: string[] = []): DeliveryPlan {
+// เปรียบเทียบกลุ่มและลำดับส่งโดยตรง การสลับตำแหน่งการ์ดไม่นับเป็นแผนใหม่
+export function sameDeliveryJobs(first: PlannedJob[], second: PlannedJob[]): boolean {
+  return first.length === second.length && first.every(job =>
+    second.some(other =>
+      job.stops.length === other.stops.length &&
+      job.stops.every((stop, index) => stop.order.order_id === other.stops[index]!.order.order_id)
+    )
+  );
+}
+
+function shuffledIndexes(indexes: number[]): number[] {
+  const shuffled = [...indexes];
+  for (let index = shuffled.length - 1; index > 0; index--) {
+    const other = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[other]] = [shuffled[other]!, shuffled[index]!];
+  }
+  return shuffled;
+}
+
+// จัดทีละใบ: เริ่มหนึ่งออเดอร์ แล้วลองเพื่อนที่ใกล้จุดส่งสุดท้ายก่อน
+function buildGreedyJobs(
+  orders: PlanningOrder[], settings: PlanningSettings, matrix: RoadMatrix, priority: number[],
+): PlannedJob[] {
+  const singleJobs = orders.map((_, index) => buildJob([index], orders, settings, matrix));
+  const impossible = orders.filter((_, index) => !singleJobs[index]);
+  if (impossible.length) {
+    throw new PlanningError("บางออเดอร์ไม่มีเส้นทางหรือส่งไม่ทันกำหนด", 422,
+      impossible.map(order => ({ order_id: order.order_id, reason: "หาเส้นทางที่ส่งทันกำหนดไม่ได้" })));
+  }
+
+  const remaining = [...priority];
+  const jobs: PlannedJob[] = [];
+  while (remaining.length > 0) {
+    const first = remaining.shift()!;
+    let group = [first];
+    let currentJob = singleJobs[first]!;
+
+    while (group.length < 3 && remaining.length > 0) {
+      const last = group[group.length - 1]!;
+      const nearby = [...remaining].sort((a, b) =>
+        (matrix[last + 1]?.[a + 1] ?? Infinity) - (matrix[last + 1]?.[b + 1] ?? Infinity));
+
+      let added = false;
+      for (const next of nearby) {
+        const separateCost = currentJob.delivery_cost + singleJobs[next]!.delivery_cost;
+        let mergedJob: PlannedJob | null = null;
+        let mergedSequence: number[] = [];
+
+        // ลองแค่กลุ่มนี้ สูงสุด 3 ออเดอร์ / 6 ลำดับ ไม่สร้างทุกกลุ่มทั้งแผนล่วงหน้า
+        for (const sequence of permutations([...group, next])) {
+          const job = buildJob(sequence, orders, settings, matrix);
+          if (!job || job.delivery_cost >= separateCost - 0.001) continue;
+          if (!mergedJob || job.delivery_cost < mergedJob.delivery_cost - 0.001) {
+            mergedJob = job;
+            mergedSequence = sequence;
+          }
+        }
+        if (!mergedJob) continue;
+
+        currentJob = mergedJob;
+        group = mergedSequence;
+        remaining.splice(remaining.indexOf(next), 1);
+        added = true;
+        break;
+      }
+      // ไม่ฝืนรวมให้ครบ 3 ถ้าไม่มีออเดอร์ที่รวมแล้วคุ้มและส่งทัน
+      if (!added) break;
+    }
+    jobs.push(currentJob);
+  }
+  return jobs;
+}
+
+export function createDeliveryPlan(
+  orders: PlanningOrder[], settings: PlanningSettings, matrix: RoadMatrix, previousJobs?: PlannedJob[],
+): DeliveryPlan {
   if (!orders.length || orders.length > 30) throw new PlanningError("จัดงานได้ครั้งละ 1–30 ออเดอร์");
   if (matrix.length !== orders.length + 1 || matrix.some(row => row.length !== matrix.length)) {
     throw new PlanningError("ตารางระยะทางไม่ตรงกับออเดอร์", 502);
   }
   validateServiceArea(orders, matrix);
-  type Candidate = { mask: number; job: PlannedJob; saving: number };
-  const candidates: Candidate[] = [];
-  const singles = orders.map((_, index) => buildJob([index], orders, settings, matrix)?.delivery_cost ?? 1e9);
-  const addGroup = (group: number[]) => {
-    // Retain different stop orders so an alternative can differ even with one group.
-    for (const sequence of permutations(group)) {
-      const job = buildJob(sequence, orders, settings, matrix);
-      if (!job) continue;
-      candidates.push({ mask: group.reduce((mask, index) => mask | (1 << index), 0), job,
-        saving: group.reduce((sum, index) => sum + singles[index]!, 0) - job.delivery_cost });
-    }
-  };
-  for (let a = 0; a < orders.length; a++) {
-    addGroup([a]);
-    for (let b = a + 1; b < orders.length; b++) {
-      addGroup([a, b]);
-      for (let c = b + 1; c < orders.length; c++) addGroup([a, b, c]);
-    }
+
+  const indexes = orders.map((_, index) => index);
+  // กดขอใหม่ได้เรื่อย ๆ แต่แต่ละคำขอลองไม่เกิน 10 ครั้ง เพื่อไม่วนไม่จบ
+  const attempts = previousJobs ? 10 : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const priority = previousJobs ? shuffledIndexes(indexes) : indexes;
+    const jobs = buildGreedyJobs(orders, settings, matrix, priority);
+    if (previousJobs && sameDeliveryJobs(jobs, previousJobs)) continue;
+
+    jobs.sort((a, b) => a.stops[0]!.order.order_id - b.stops[0]!.order.order_id);
+    const sum = (key: "total_boxes" | "total_distance_km" | "delivery_cost" | "revenue" | "food_cost" | "profit") =>
+      round(jobs.reduce((total, job) => total + job[key], 0));
+    return {
+      settings, jobs,
+      method: "Greedy: รวมออเดอร์ใกล้เคียงเมื่อคุ้มและส่งทัน ไม่รับประกันค่าส่งต่ำที่สุดทั้งแผน",
+      summary: {
+        total_orders: orders.length, total_boxes: sum("total_boxes"), riders: jobs.length,
+        total_distance_km: sum("total_distance_km"), delivery_cost: sum("delivery_cost"),
+        revenue: sum("revenue"), food_cost: sum("food_cost"), profit: sum("profit"),
+      },
+    };
   }
-  const byOrder = orders.map((_, index) => candidates.filter(candidate => candidate.mask & (1 << index))
-    .sort((a, b) => b.saving - a.saving || a.job.delivery_cost - b.job.delivery_cost));
-  const impossible = orders.filter((_, index) => !byOrder[index]!.length);
-  if (impossible.length) throw new PlanningError("บางออเดอร์ไม่มีเส้นทางหรือส่งไม่ทันกำหนด", 422,
-    impossible.map(order => ({ order_id: order.order_id, reason: "หาเส้นทางที่ส่งทันกำหนดไม่ได้" })));
-  const lowerShare = byOrder.map(list => Math.min(...list.map(item => item.job.delivery_cost / item.job.stops.length)));
-  const all = (1 << orders.length) - 1;
-  const excludedSet = new Set(excluded);
-  let bestJobs: PlannedJob[] | null = null;
-  let bestCost = Infinity;
-  let visited = 0;
-  let exhausted = true;
-  const end = Date.now() + 1500;
-  const search = (used: number, jobs: PlannedJob[], cost: number) => {
-    if (++visited > 40_000 || Date.now() > end) { exhausted = false; return; }
-    if (used === all) {
-      if (cost < bestCost - 0.001 && !excludedSet.has(planSignature(jobs))) {
-        bestCost = cost;
-        bestJobs = [...jobs];
-      }
-      return;
-    }
-    let bound = cost;
-    let first = -1;
-    for (let index = 0; index < orders.length; index++) if (!(used & (1 << index))) {
-      bound += lowerShare[index]!;
-      if (first < 0) first = index;
-    }
-    if (bound >= bestCost - 0.001) return;
-    for (const candidate of byOrder[first]!) {
-      if (candidate.mask & used) continue;
-      search(used | candidate.mask, [...jobs, candidate.job], cost + candidate.job.delivery_cost);
-      if (!exhausted) return;
-    }
-  };
-  search(0, [], 0);
-  if (!bestJobs) throw new PlanningError(excluded.length
-    ? "ไม่พบแผนทางเลือกเพิ่มเติมภายในเวลาค้นหา เลือกใช้แผนเดิมหรือปรับเงื่อนไข"
-    : "ยังจัดแผนที่ครอบคลุมทุกออเดอร์ไม่ได้ กรุณาปรับเวลาออกหรือกำหนดส่ง", 422);
-  const jobs = bestJobs as PlannedJob[];
-  jobs.sort((a, b) => a.stops[0]!.order.order_id - b.stops[0]!.order.order_id);
-  const sum = (key: "total_boxes" | "total_distance_km" | "delivery_cost" | "revenue" | "food_cost" | "profit") =>
-    round(jobs.reduce((total, job) => total + job[key], 0));
-  return { settings, jobs, signature: planSignature(jobs),
-    method: exhausted ? "ค้นหาครบภายใต้เส้นทางและเงื่อนไขที่กำหนด" : "แผนต้นทุนต่ำจากการค้นหาแบบจำกัดเวลา ไม่รับประกันค่าต่ำสุดทั้งหมด",
-    summary: { total_orders: orders.length, total_boxes: sum("total_boxes"), riders: jobs.length,
-      total_distance_km: sum("total_distance_km"), delivery_cost: sum("delivery_cost"),
-      revenue: sum("revenue"), food_cost: sum("food_cost"), profit: sum("profit") } };
+  throw new PlanningError("ไม่พบแผนที่ต่างจากแผนปัจจุบันในการลองครั้งนี้ ลองอีกครั้งหรือใช้แผนเดิม", 422);
 }

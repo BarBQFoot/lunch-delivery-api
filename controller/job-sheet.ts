@@ -2,7 +2,7 @@ import express, { type RequestHandler } from "express";
 import { conn } from "../dbconnect";
 import { PlanningError } from "../model/delivery";
 import { createDeliveryPlan } from "../service/delivery-planning";
-import { confirmPreview, deliverStop, eligibleOrders, getJob, listJobs, rememberPreview, selectedOrders, startJob } from "../service/job-store";
+import { confirmPreview, deliverStop, eligibleOrders, getJob, getPreview, listJobs, rememberPreview, selectedOrders, startJob } from "../service/job-store";
 import { getDistanceMatrix, getRoute, OsrmError, parseCoordinate } from "../service/osrm";
 import { readOrderIds, readSettings } from "../service/planning-input";
 
@@ -36,15 +36,21 @@ router.get("/eligible-orders", handle(async (req, res) => {
 router.post("/preview", handle(async (req, res) => {
   const settings = readSettings(req.body?.settings);
   const ids = readOrderIds(req.body?.order_ids);
-  const excluded = req.body?.exclude_signatures ?? [];
-  if (!Array.isArray(excluded) || excluded.length > 20 ||
-      excluded.some(item => typeof item !== "string" || !/^[a-f0-9]{64}$/.test(item))) {
-    throw new PlanningError("รายการแผนที่ขอข้ามไม่ถูกต้อง");
+  const previousId = req.body?.previous_preview_id;
+  if (previousId !== undefined && (typeof previousId !== "string" || !previousId.trim())) {
+    throw new PlanningError("รหัสแผนปัจจุบันไม่ถูกต้อง");
   }
+  if (req.body?.exclude_signatures !== undefined) {
+    throw new PlanningError("ใช้ previous_preview_id สำหรับขอแผนอื่น กรุณาอัปเดต frontend");
+  }
+  const previous = previousId ? getPreview(previousId) : undefined;
   const orders = await selectedOrders(ids, settings.delivery_date);
   const matrix = await getDistanceMatrix([settings.origin, ...orders]);
-  const plan = createDeliveryPlan(orders, settings, matrix, excluded);
-  res.json(rememberPreview(plan, orders));
+  // แก้รายการออเดอร์/เงื่อนไขได้ด้วย แต่ข้ามแผนเดิมเฉพาะเมื่อเป็นข้อมูลนำเข้าชุดเดิม
+  const sameInput = previous && JSON.stringify(previous.plan.settings) === JSON.stringify(settings) &&
+    JSON.stringify(previous.orders.map(order => order.order_id).sort((a, b) => a - b)) === JSON.stringify(ids);
+  const plan = createDeliveryPlan(orders, settings, matrix, sameInput ? previous.plan.jobs : undefined);
+  res.json(rememberPreview(plan, orders, previousId));
 }));
 
 router.post("/confirm", handle(async (req, res) => {

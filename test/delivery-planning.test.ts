@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { createDeliveryPlan, buildJob } from "../service/delivery-planning";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeliveryPlan, buildJob, sameDeliveryJobs } from "../service/delivery-planning";
 import { readSettings, readOrderIds, normalizeOrders } from "../service/planning-input";
 import type { PlanningOrder } from "../model/delivery";
 
@@ -8,6 +8,7 @@ const order = (id: number, quantity = 1): PlanningOrder => ({ order_id: id, cust
   delivery_date: "2026-10-05", quantity, unit_price: 65, unit_cost: 40, status: "ACTIVE",
   name: `Customer ${id}`, phone: "000", address: "test", latitude: 16.25 + id / 10000, longitude: 103.25 });
 const matrix = (n: number) => Array.from({ length: n + 1 }, (_, a) => Array.from({ length: n + 1 }, (_, b) => a === b ? 0 : 1));
+afterEach(() => vi.restoreAllMocks());
 
 describe("Delivery planning", () => {
   it("covers every order exactly once, with at most 3 orders per job and consistent totals", () => {
@@ -27,7 +28,7 @@ describe("Delivery planning", () => {
     expect(job.stops.map(stop => stop.estimated_arrival_at.slice(11))).toEqual(["11:32:00", "11:36:00", "11:40:00"]);
   });
 
-  it("minimizes cost instead of always using the fewest riders", () => {
+  it("keeps distant leftovers separate when merging would cost more", () => {
     const distances = [[0, 1, 1], [1, 0, 10], [1, 10, 0]];
     const plan = createDeliveryPlan([order(1, 3), order(2, 3)], settings, distances);
     expect(plan.jobs).toHaveLength(2);
@@ -83,18 +84,46 @@ describe("Delivery planning", () => {
   });
 
   it("produces a genuinely different alternative and reports exhaustion", () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const orders = [order(1), order(2)];
     const first = createDeliveryPlan(orders, settings, matrix(2));
-    const second = createDeliveryPlan(orders, settings, matrix(2), [first.signature]);
-    expect(second.signature).not.toBe(first.signature);
+    const second = createDeliveryPlan(orders, settings, matrix(2), first.jobs);
+    expect(sameDeliveryJobs(second.jobs, first.jobs)).toBe(false);
+    // ไม่จำประวัติ: ขอข้าม B แล้วกลับมาเป็น A ได้
+    vi.mocked(Math.random).mockReturnValue(0.99);
+    const third = createDeliveryPlan(orders, settings, matrix(2), second.jobs);
+    expect(sameDeliveryJobs(third.jobs, first.jobs)).toBe(true);
     const one = createDeliveryPlan([order(1)], settings, matrix(1));
-    expect(() => createDeliveryPlan([order(1)], settings, matrix(1), [one.signature])).toThrow("ไม่พบแผนทางเลือก");
+    expect(() => createDeliveryPlan([order(1)], settings, matrix(1), one.jobs)).toThrow("ไม่พบแผนที่ต่าง");
   });
 
-  it("handles 30 orders within the bounded search budget", () => {
+  it("handles 30 orders without dropping or duplicating orders", () => {
     const plan = createDeliveryPlan(Array.from({ length: 30 }, (_, i) => order(i + 1)), settings, matrix(30));
     expect(plan.summary.total_orders).toBe(30);
     expect(new Set(plan.jobs.flatMap(job => job.stops.map(stop => stop.order.order_id))).size).toBe(30);
+  });
+
+  it("tries a near neighbour first and does not force the far leftover into the job", () => {
+    const distances = [[0, 1, 1, 1], [1, 0, 10, 0.1], [1, 10, 0, 10], [1, 0.1, 10, 0]];
+    const plan = createDeliveryPlan([order(1), order(2), order(3)], settings, distances);
+    expect(plan.jobs.map(job => job.stops.map(stop => stop.order.order_id))).toEqual([[1, 3], [2]]);
+    const separate = [0, 1, 2].reduce((sum, index) => sum + buildJob([index], [order(1), order(2), order(3)], settings, distances)!.delivery_cost, 0);
+    expect(plan.summary.delivery_cost).toBeLessThan(separate);
+  });
+
+  it("does not merge even a close neighbour when handover would finish after the deadline", () => {
+    const plan = createDeliveryPlan([order(1), order(2)], { ...settings, deadline_time: "11:34" },
+      [[0, 1, 1], [1, 0, 0.1], [1, 0.1, 0]]);
+    expect(plan.jobs).toHaveLength(2);
+  });
+
+  it("compares actual ordered deliveries rather than the display order of job cards", () => {
+    const first = buildJob([0], [order(1), order(2)], settings, matrix(2))!;
+    const second = buildJob([1], [order(1), order(2)], settings, matrix(2))!;
+    expect(sameDeliveryJobs([first, second], [second, first])).toBe(true);
+    const forward = buildJob([0, 1], [order(1), order(2)], settings, matrix(2))!;
+    const reverse = buildJob([1, 0], [order(1), order(2)], settings, matrix(2))!;
+    expect(sameDeliveryJobs([forward], [reverse])).toBe(false);
   });
 });
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), begin: vi.fn(), commit: vi.fn(), rollback: vi.fn(), release: vi.fn(), matrix: vi.fn(), randomCode: vi.fn() }));
@@ -8,6 +8,8 @@ vi.mock("../dbconnect", () => ({ conn: { query: mocks.query, getConnection: asyn
 vi.mock("../service/osrm", async importOriginal => ({ ...await importOriginal<typeof import("../service/osrm")>(), getDistanceMatrix: mocks.matrix }));
 
 import { app } from "../app";
+import { getPreview, rememberPreview } from "../service/job-store";
+import { OsrmError } from "../service/osrm";
 
 const settings = { delivery_date: "2026-10-05", origin: { latitude: 16.25, longitude: 103.25 } };
 const rows = [1, 2].map(id => ({ order_id: id, customer_id: id, delivery_date: "2026-10-05", quantity: 1,
@@ -28,6 +30,7 @@ beforeEach(() => {
     return [[]];
   });
 });
+afterEach(() => vi.restoreAllMocks());
 
 async function preview() {
   const response = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1, 2] });
@@ -146,5 +149,92 @@ describe("Job sheet API with mocked database", () => {
     expect(response.status).toBe(422);
     expect(response.body.details).toMatchObject([{ order_id: 2, distance_km: 3.1 }]);
     expect(mocks.begin).not.toHaveBeenCalled();
+  });
+
+  it("replaces only the current preview, without a signature, and confirms the replacement", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const id = await preview();
+    const otherUserId = await preview();
+    const response = await request(app).post("/job-sheets/preview").send({
+      settings, order_ids: [1, 2], previous_preview_id: id,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.signature).toBeUndefined();
+    expect(response.body.preview_id).not.toBe(id);
+    expect(() => getPreview(id)).toThrow("ถูกแทนที่");
+    expect(getPreview(otherUserId)).toBeDefined();
+    expect(mocks.begin).not.toHaveBeenCalled();
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: response.body.preview_id })).status).toBe(201);
+  });
+
+  it("keeps the current preview confirmable when no alternative is found", async () => {
+    mocks.matrix.mockResolvedValue([[0, 1], [1, 0]]);
+    const first = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1] });
+    const id = first.body.preview_id;
+    const response = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1], previous_preview_id: id });
+    expect(response.status).toBe(422);
+    expect(getPreview(id)).toBeDefined();
+    currentRows = [rows[0]!];
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: id })).status).toBe(201);
+  });
+
+  it("keeps the current preview when OSRM fails", async () => {
+    const id = await preview();
+    mocks.matrix.mockRejectedValueOnce(new OsrmError("upstream failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1, 2], previous_preview_id: id });
+    expect(response.status).toBe(502);
+    expect(getPreview(id)).toBeDefined();
+  });
+
+  it.each(["", 123, {}])("rejects an invalid previous preview id before requesting OSRM: %s", async previous_preview_id => {
+    const response = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1, 2], previous_preview_id });
+    expect(response.status).toBe(400);
+    expect(mocks.matrix).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired previous preview before requesting OSRM", async () => {
+    const id = await preview();
+    const expires = getPreview(id).expires;
+    mocks.matrix.mockClear();
+    vi.spyOn(Date, "now").mockReturnValue(expires + 1);
+    const response = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1, 2], previous_preview_id: id });
+    expect(response.status).toBe(409);
+    expect(mocks.matrix).not.toHaveBeenCalled();
+  });
+
+  it("replaces a draft after selection or settings change without demanding different routes", async () => {
+    const id = await preview();
+    mocks.matrix.mockResolvedValue([[0, 1], [1, 0]]);
+    const edited = await request(app).post("/job-sheets/preview").send({ settings, order_ids: [1], previous_preview_id: id });
+    expect(edited.status).toBe(200);
+    expect(() => getPreview(id)).toThrow();
+    const changedTime = await request(app).post("/job-sheets/preview").send({
+      settings: { ...settings, departure_time: "11:00" }, order_ids: [1], previous_preview_id: edited.body.preview_id,
+    });
+    expect(changedTime.status).toBe(200);
+  });
+
+  it("rejects a late replacement after another request has already replaced the same preview", async () => {
+    const id = await preview();
+    const stored = getPreview(id);
+    const next = rememberPreview(stored.plan, stored.orders, id);
+    expect(() => rememberPreview(stored.plan, stored.orders, id)).toThrow("ถูกแทนที่");
+    expect(getPreview(next.preview_id)).toBeDefined();
+  });
+
+  it("allows more than 20 plan changes without keeping a history", async () => {
+    const random = vi.spyOn(Math, "random");
+    let id = await preview();
+    for (let index = 0; index < 22; index++) {
+      random.mockReturnValue(index % 2 === 0 ? 0 : 0.99);
+      const response = await request(app).post("/job-sheets/preview").send({
+        settings, order_ids: [1, 2], previous_preview_id: id,
+      });
+      expect(response.status).toBe(200);
+      expect(() => getPreview(id)).toThrow();
+      id = response.body.preview_id;
+    }
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: id })).status).toBe(201);
   });
 });
