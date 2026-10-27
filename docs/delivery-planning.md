@@ -316,3 +316,25 @@ node scripts/smoke-order-location.cjs
 ```sh
 npm test -- --watch=false --include=src/app/frontend/test-api/test-api.spec.ts
 ```
+
+
+## Persisted route geometry
+
+New confirmations store a server-generated GeoJSON LineString under
+`planning_data.route_geometry` in the existing job_sheets table. No schema migration
+is required. External routing completes before the database transaction starts;
+if routing fails, no jobs are saved and the preview remains available to retry.
+The preview is checked again after routing, and orders are revalidated under lock.
+
+GET /job-sheets/by-code/:code returns an additive top-level route_geometry field.
+Older jobs return null; reading a job never calls OSRM or changes stored data.
+The frontend must use this field directly for confirmed jobs and only request
+/job-sheets/route when geometry is missing. The current frontend still requests
+routes until it is updated. Old jobs are not automatically backfilled.
+
+Route requests use a five-minute in-memory cache (maximum 200 entries), keyed by
+provider and ordered coordinates, and share identical in-flight requests. The
+demo server queue and rate limit remain in place. Saved geometry survives backend
+restarts in planning_data; the temporary cache does not. The confirm API request
+body and response format are unchanged. First-time confirmations without cached
+geometry still wait for OSRM; cache does not eliminate free-host cold starts.

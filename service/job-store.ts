@@ -15,6 +15,7 @@ import {
   validDate,
 } from "../model/delivery";
 import { normalizeOrders } from "./planning-input";
+import { getRoute } from "./osrm";
 
 // เปลี่ยน: ทั้งคำนวณแผน ยืนยัน และเปิดใบงาน ใช้จุดส่งของออเดอร์แทนพิกัดลูกค้าปัจจุบัน
 export const ORDER_FIELDS = `o.*, DATE_FORMAT(o.delivery_date, '%Y-%m-%d') AS delivery_date,
@@ -97,6 +98,17 @@ async function transaction<T>(
 
 export async function confirmPreview(id: string) {
   const preview = getPreview(id);
+  // Resolve external requests BEFORE acquiring database locks. Existing /route
+  // calls from the preview reuse the same cache and in-flight request.
+  const routes = await Promise.all(preview.plan.jobs.map(job => {
+    const points = [preview.plan.settings.origin, ...job.stops.map(stop => ({
+      latitude: stop.order.latitude, longitude: stop.order.longitude,
+    }))];
+    if (preview.plan.settings.return_to_shop) points.push(preview.plan.settings.origin);
+    return getRoute(points);
+  }));
+  // OSRM may take long enough for the preview to expire or be replaced.
+  getPreview(id);
   const issued = await transaction(async (db) => {
     const ids = preview.orders
       .map((order) => order.order_id)
@@ -124,7 +136,7 @@ export async function confirmPreview(id: string) {
       );
     }
     const result: { job_id: number; job_code: string }[] = [];
-    for (const job of preview.plan.jobs) {
+    for (const [index, job] of preview.plan.jobs.entries()) {
       const settings = preview.plan.settings;
       if (
         job.delivery_cost > 99_999_999.99 ||
@@ -135,7 +147,7 @@ export async function confirmPreview(id: string) {
           422,
         );
       }
-      const planningData: StoredPlanningData = { settings, job };
+      const planningData: StoredPlanningData = { settings, job, route_geometry: routes[index]! };
       let issuedJob: { job_id: number; job_code: string } | undefined;
       for (let attempt = 0; attempt < 10; attempt++) {
         const code = String(randomInt(100_000, 1_000_000));
@@ -243,6 +255,7 @@ export async function getJob(code: string) {
     ...job,
     planning_data: undefined,
     settings: data?.settings ?? null,
+    route_geometry: data?.route_geometry ?? null,
     totals: data?.job ? { ...data.job, stops: undefined } : null,
     stops: stops.map((stop) => ({
       ...stop,

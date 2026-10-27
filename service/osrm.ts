@@ -127,7 +127,27 @@ export async function getDistanceMatrix(points: Coordinates[]): Promise<RoadMatr
   }
 }
 
-export async function getRoute(points: Coordinates[]): Promise<RouteLine> {
+// Cache is separate from the distance matrix; identical concurrent requests share work.
+const routeCache = new Map<string, { expires: number; line: RouteLine }>();
+const pendingRoutes = new Map<string, Promise<RouteLine>>();
+
+export function getRoute(points: Coordinates[]): Promise<RouteLine> {
+  const baseUrl = (process.env.OSRM_BASE_URL || "https://router.project-osrm.org").replace(/\/+$/, "");
+  const key = JSON.stringify([baseUrl, points.map(point => [point.longitude, point.latitude])]);
+  const cached = routeCache.get(key);
+  if (cached && cached.expires > Date.now()) return Promise.resolve(cached.line);
+  const pending = pendingRoutes.get(key);
+  if (pending) return pending;
+  const request = requestRoute(points).then(line => {
+    if (routeCache.size >= 200) routeCache.delete(routeCache.keys().next().value!);
+    routeCache.set(key, { expires: Date.now() + 5 * 60_000, line });
+    return line;
+  }).finally(() => pendingRoutes.delete(key));
+  pendingRoutes.set(key, request);
+  return request;
+}
+
+async function requestRoute(points: Coordinates[]): Promise<RouteLine> {
   if (points.length < 2 || points.length > 5) throw new OsrmError("Expected 2–5 route locations");
   try {
     const baseUrl = (process.env.OSRM_BASE_URL || "https://router.project-osrm.org").replace(/\/+$/, "");

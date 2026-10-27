@@ -1,4 +1,4 @@
-import type { Coordinates } from "../service/osrm";
+import type { Coordinates, RouteLine } from "../service/osrm";
 
 export class PlanningError extends Error {
   constructor(message: string, public status = 400, public details: unknown = undefined) {
@@ -72,6 +72,8 @@ export interface DeliveryPlan {
 export interface StoredPlanningData {
   settings: PlanningSettings;
   job: PlannedJob;
+  // Optional for jobs saved before route persistence was introduced.
+  route_geometry?: RouteLine;
 }
 
 export function validDate(value: unknown): value is string {

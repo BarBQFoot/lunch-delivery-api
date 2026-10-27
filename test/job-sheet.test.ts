@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 
-const mocks = vi.hoisted(() => ({ query: vi.fn(), begin: vi.fn(), commit: vi.fn(), rollback: vi.fn(), release: vi.fn(), matrix: vi.fn(), randomCode: vi.fn() }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), begin: vi.fn(), commit: vi.fn(), rollback: vi.fn(), release: vi.fn(), matrix: vi.fn(), route: vi.fn(), randomCode: vi.fn() }));
 vi.mock("node:crypto", async importOriginal => ({ ...await importOriginal<typeof import("node:crypto")>(), randomInt: mocks.randomCode }));
 vi.mock("../dbconnect", () => ({ conn: { query: mocks.query, getConnection: async () => ({ query: mocks.query,
   beginTransaction: mocks.begin, commit: mocks.commit, rollback: mocks.rollback, release: mocks.release }) } }));
-vi.mock("../service/osrm", async importOriginal => ({ ...await importOriginal<typeof import("../service/osrm")>(), getDistanceMatrix: mocks.matrix }));
+vi.mock("../service/osrm", async importOriginal => ({ ...await importOriginal<typeof import("../service/osrm")>(), getDistanceMatrix: mocks.matrix, getRoute: mocks.route }));
 
 import { app } from "../app";
 import { getPreview, rememberPreview } from "../service/job-store";
@@ -21,6 +21,7 @@ let assigned: unknown[] = [];
 beforeEach(() => {
   vi.clearAllMocks(); currentRows = rows; assigned = [];
   mocks.randomCode.mockReset().mockReturnValue(482731);
+  mocks.route.mockReset().mockResolvedValue({ type: "LineString", coordinates: [[103.25, 16.25], [103.25, 16.251]] });
   mocks.matrix.mockResolvedValue([[0, 1, 1], [1, 0, 1], [1, 1, 0]]);
   mocks.query.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM orders o")) return [currentRows];
@@ -39,6 +40,34 @@ async function preview() {
 }
 
 describe("Job sheet API with mocked database", () => {
+  it("persists server-generated geometry and returns it without OSRM on reads", async () => {
+    const id = await preview();
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: id })).status).toBe(201);
+    const insert = mocks.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO job_sheets"))!;
+    const data = JSON.parse(insert[1][7]);
+    expect(data.route_geometry).toEqual(await mocks.route.mock.results[0]!.value);
+    expect(mocks.route).toHaveBeenCalledWith([
+      settings.origin, ...data.job.stops.map((stop: any) => ({ latitude: stop.order.latitude, longitude: stop.order.longitude })),
+    ]);
+    mocks.route.mockClear();
+    mocks.query.mockImplementation(async (sql: string) => sql.includes("FROM job_sheets")
+      ? [[{ job_id: 11, job_code: "482731", planning_data: JSON.stringify(data) }]] : [[]]);
+    const opened = await request(app).get("/job-sheets/by-code/482731");
+    expect(opened.status).toBe(200);
+    expect(opened.body.route_geometry).toEqual(data.route_geometry);
+    expect(mocks.route).not.toHaveBeenCalled();
+  });
+
+  it("keeps the preview and performs no transaction when route generation fails", async () => {
+    const id = await preview();
+    mocks.route.mockRejectedValueOnce(new OsrmError("offline"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: id })).status).toBe(502);
+    expect(mocks.begin).not.toHaveBeenCalled();
+    expect(() => getPreview(id)).not.toThrow();
+    expect((await request(app).post("/job-sheets/confirm").send({ preview_id: id })).status).toBe(201);
+  });
+
   it("previews without writing, then atomically confirms and consumes the preview", async () => {
     const id = await preview();
     expect(mocks.begin).not.toHaveBeenCalled();
@@ -97,6 +126,7 @@ describe("Job sheet API with mocked database", () => {
     const response = await request(app).get(`/job-sheets/by-code/${code}`);
     expect(response.status).toBe(200);
     expect(response.body.job_code).toBe(code);
+    expect(response.body.route_geometry).toBeNull();
     expect(mocks.query.mock.calls[0]![1]).toEqual([code]);
   });
 

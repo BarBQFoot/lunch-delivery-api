@@ -12,7 +12,11 @@ const handle = (handler: RequestHandler): RequestHandler => async (req, res, nex
   try { await handler(req, res, next); }
   catch (error) {
     if (error instanceof PlanningError) return void res.status(error.status).json({ error: error.message, details: error.details });
-    if (error instanceof OsrmError) return void res.status(502).json({ error: "ติดต่อ OSRM ไม่สำเร็จ กรุณาลองใหม่" });
+    if (error instanceof OsrmError) {
+      console.error("Job sheet routing failed", { message: error.message,
+        cause: error.cause instanceof Error ? error.cause.message : undefined });
+      return void res.status(502).json({ error: "ติดต่อ OSRM ไม่สำเร็จ กรุณาลองใหม่" });
+    }
     const code = (error as { code?: string }).code;
     if (code === "ER_DUP_ENTRY") return void res.status(409).json({ error: "มีออเดอร์ถูกจัดงานแล้ว กรุณาคำนวณแผนใหม่" });
     if (code === "ER_BAD_FIELD_ERROR") return void res.status(503).json({ error: "ฐานข้อมูลยังไม่มีคอลัมน์สำหรับระบบใบงาน กรุณารัน npm run db:migrate ที่ Backend" });
